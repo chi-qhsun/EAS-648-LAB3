@@ -1,0 +1,204 @@
+---
+title: "LAB3"
+author: "Chi Sun"
+date: "2023-11-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Library Import and Data Loading
+This section imports necessary R libraries for data processing and visualization. It then loads the `MichiganFlickr.csv` file into a data frame named MichFlickr. This dataset is assumed to contain information about photographs uploaded to Flickr from Michigan.
+```{r, message=FALSE, warning=FALSE}
+library(readr)
+library(ggplot2)
+library(ggthemes)
+library(gganimate)
+library(foreign)
+library(dplyr)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(gifski)
+library(lubridate)
+library(wesanderson)
+library(sf)
+
+MichFlickr <- read.csv("MichiganFlickr.csv")
+```
+
+## Generate a Universal Date
+This chunk converts the 'dateupload' field from the MichFlickr dataset to a more standard Date format. It also extracts and stores year, month, and day as separate columns. Additionally, a count column is initialized to 1 for each record, which could be used later in aggregating data.
+```{r,message=FALSE, warning=FALSE}
+MichFlickr$date <- as.POSIXct(MichFlickr$dateupload, origin="1970-01-01")
+MichFlickr$date <- as.Date(format(MichFlickr$date, format="%Y-%m-%d"))
+MichFlickr$year <- year(MichFlickr$date)
+MichFlickr$month <- month(MichFlickr$date, label = TRUE)
+MichFlickr$day <- day(MichFlickr$date)
+MichFlickr$count<- 1
+```
+
+## Daily Photography Analysis
+This code block is dedicated to analyzing the daily photography trends in the dataset. It groups the data by the date and calculates the total number of photos taken each day. This provides insight into the daily volume of photography activity in Michigan as captured by Flickr.
+```{r,message=FALSE, warning=FALSE}
+daily_photography <- MichFlickr %>%
+  mutate(day = as.Date(date, format="%Y-%m-%d")) %>%
+  group_by(date) %>% # group by the day column
+  summarise(total_photos=sum(count)) %>%  # calculate the SUM of all precipitation that occurred on each day
+  na.omit()
+```
+
+## Monthly Photography Analysis and Geospatial Visualization
+In this section, the data is first filtered to a specific year (2017) and then analyzed on a monthly basis. The goal is to understand photography trends over different months and how they are distributed geographically across Michigan. This involves categorizing the data and preparing a geospatial visualization using ggplot2 and gganimate.
+
+```{r,message=FALSE, warning=FALSE}
+library(maps)
+library(classInt)
+# Ensure to define the date range first
+min <- as.Date("2017-01-01")
+max <- as.Date("2017-12-01")
+
+# Filter the data using the defined date range
+Filtered_data <- MichFlickr %>%
+  filter(date >= min & date <= max)
+
+# Retain the required columns
+MichFlickr_filtered <- Filtered_data %>%
+  select(id, owner, date, year, month, day, count, latitude, longitude, Landuse)
+
+# Create a dataset grouped by month using the filtered dataset
+monthly_photography <- MichFlickr_filtered %>%
+  filter(!is.na(latitude) & !is.na(longitude)) %>% # Filter out NA values for latitude and longitude
+  group_by(date, latitude, longitude, Landuse) %>%
+  summarise(total_photos = sum(count)) %>%
+  na.omit()
+
+# Categorical variable
+monthly_photography$photo_cat <- cut(monthly_photography$total_photos, breaks = c(0, 1, 2, 5, 10, 20, 50, Inf), labels = c("0-1", "1-2", "2-5", "5-10", "10-20", "20-50", ">50"))
+
+usa_counties_map <- map_data("county")
+michigan_counties_map <- usa_counties_map %>%
+  filter(region == "michigan")
+
+# Create a dynamic map
+p_monthly_map <- ggplot() +
+  geom_polygon(data = michigan_counties_map, aes(x = long, y = lat, group = group), fill = "lightgrey", color = "white") +
+  geom_point(data = monthly_photography, aes(x = longitude, y = latitude, color = as.factor(photo_cat), size = total_photos), alpha = 0.5) +
+  scale_color_manual(values = c("0-1" = "blue", "1-2" = "lightblue", "2-5" = "green", "5-10" = "lightgreen", "10-20" = "yellow", "20-50" = "red", ">50" = "darkred")) +
+  scale_size(range = c(8, 60)) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 25),  # Set font size for the x-axis
+    axis.text.y = element_text(size = 25)   # Set font size for the y-axis
+  ) +
+  theme(legend.position = "bottom") +
+  labs(title = 'Michigan Photo Hotspot by Flickr', x = 'Longitude', y = 'Latitude', color = 'Total Photos', size = 'Total Photos')
+
+# Create a dynamic map using gganimate
+anim_monthly_map <- p_monthly_map +
+  transition_time(date) +  # Use the date field as the basis for the animation
+  ease_aes('linear') +
+  labs(title = 'Michigan Photo Hotspot by Flickr: {frame_time}', x = 'Longitude', y = 'Latitude', color = 'Total Photos', size = 25)
+
+# Save the dynamic map
+# Set the nframes parameter to 30 to make the animation approximately 3 seconds long
+anim_save("monthly_tourism_over_time.gif", animation = anim_monthly_map, width = 1600, height = 1600, nframes = 30)
+``` 
+
+## User Photo Distribution Analysis
+```{r,message=FALSE, warning=FALSE}
+# Calculate the number of photos uploaded by each user
+user_photo_count <- MichFlickr_filtered %>%
+  group_by(owner) %>%
+  summarise(total_photos = n()) %>%
+  arrange(desc(total_photos))
+
+# Plotting the distribution of photo uploads by each user
+ggplot(user_photo_count, aes(x = reorder(owner, total_photos), y = total_photos)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_blank()) +
+  labs(title = "Photo Uploads by User", x = "User", y = "Total Photos")
+```
+
+
+## Implementing a Dynamic Weighting System
+To dynamically adjust the weight based on the number of photos uploaded by each user, we can design a sliding scale weight system. This system will decrease the weight of each photo as the number of photos uploaded by a user increases relative to a certain baseline value. Thus, the more photos a user uploads, the smaller the impact of each of their photos on the total daily photo count.
+
+Steps to Implement the Weighting System
+- Determine Baseline Value and Weight Function:
+
+- Establish a baseline value, such as the median or average number of photos uploaded by all users.
+Design a weight function that reduces the weight as the number of uploads exceeds the baseline value.
+Calculate Weight for Each User:
+
+- For each user, calculate the weight based on their upload count and the weight function.
+Apply Weights to Dataset:
+
+- Adjust the count value for each record in the dataset based on the weight of its user.
+Recalculate Total Daily Photo Counts:
+
+- Using the adjusted data, recalculate the total number of photos for each day.
+
+
+```{r,message=FALSE, warning=FALSE}
+# Calculate the median number of photos uploaded by all users
+median_photos <- median(user_photo_count$total_photos)
+
+# Define a simple weight function
+weight_function <- function(photos, median_photos) {
+  if (photos <= median_photos) {
+    return(1)
+  } else {
+    return(1 / (photos / median_photos))
+  }
+}
+# Calculate weights for each user
+user_photo_count <- user_photo_count %>%
+  mutate(weight = mapply(weight_function, total_photos, median_photos))
+
+# Apply weights to the MichFlickr dataset
+MichFlickr_weighted <- MichFlickr_filtered %>%
+  left_join(user_photo_count, by = "owner") %>%
+  mutate(weighted_count = count * weight)
+
+# Recalculate daily total photo counts with weights
+daily_photography_weighted <- MichFlickr_weighted %>%
+  mutate(day = as.Date(date, format="%Y-%m-%d")) %>%
+  group_by(date, latitude, longitude) %>%
+  summarise(total_weighted_photos = sum(weighted_count)) %>%
+  na.omit()
+
+# Categorize the total weighted photos
+daily_photography_weighted$photo_cat <- cut(daily_photography_weighted$total_weighted_photos, breaks = c(0, 1, 2, 3, 4, 5, Inf), labels = c("0-1", "1-2" ,"2-3", "3-4", "4-5",">5" ))
+
+# Plot the dynamic map using ggplot and gganimate
+p_monthly_mapf <- ggplot() +
+  geom_polygon(data = michigan_counties_map, aes(x = long, y = lat, group = group), fill = "lightgrey", color = "white") +
+  geom_point(data = daily_photography_weighted, aes(x = longitude, y = latitude, color = as.factor(photo_cat), size = total_weighted_photos), alpha = 0.5) +
+scale_color_manual(values = c("0-1" = "blue", "1-2" = "lightblue","2-3" = "green", "3-4" = "lightgreen", "4-5" = "yellow",">5" = "darkred"))+
+  scale_size(range = c(8, 60))+
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 25),  
+    axis.text.y = element_text(size = 25)   
+  )+
+  theme(legend.position = "bottom") +
+  labs(title = 'Michigan Photo Hotspot by Flickr Filtered', x = 'Longitude', y = 'Latitude', color = 'total_weighted_photos', size = 'total_weighted_photos')
+
+# Create a dynamic map using gganimate
+anim_monthly_mapf <- p_monthly_mapf +
+  transition_time(date) +  # Use the date field as the basis for the animation
+  ease_aes('linear') +
+  labs(title = 'Michigan Photo Hotspot by Flickr: {frame_time}', x = 'Longitude', y = 'Latitude', color = 'total_weighted_photos', size = 25)
+
+# Save the dynamic map
+# Set the nframes parameter to 30 to make the animation approximately 3 seconds long
+anim_save("monthly_tourism_over_time_filtered.gif", animation = anim_monthly_mapf, width = 1600, height = 1600, nframes = 30)
+```
+
+This approach effectively adjusts the weight of each user's contribution based on their photo upload volume, resulting in a more nuanced and representative analysis of the photo distribution data.
+
+
+
+
+
